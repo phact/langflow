@@ -1,28 +1,38 @@
 import io
+import os
+
 from dotenv import load_dotenv
-from langflow.custom import CustomComponent
+from langflow.custom import Component
+from langflow.inputs import SecretStrInput, MultilineInput
+from langflow.schema.message import Message
+from langflow.template import Output
 
 
-class Dotenv(CustomComponent):
+class Dotenv(Component):
     display_name = "Dotenv"
     description = "Load .env file into env vars"
 
-    def build_config(self):
-        return {
-            "dotenv_file_content": {
-                "display_name": "Dotenv file content",
-                "advanced": False,
-                "info": (
-                    "Paste the content of your .env file directly\n\n"
-                    "Since contents are sensitive, using a Global variable set as 'password' is recommended"
-                ),
-            },
-        }
+    inputs = [
+        MultilineInput(
+            name="dotenv_file_content",
+            display_name="Dotenv file content",
+            info="Paste the content of your .env file directly, since contents are sensitive, using a Global variable set as 'password' is recommended",
+        )
+    ]
 
-    def build(self, dotenv_file_content: str) -> str:
+    outputs = [
+        Output(display_name="env_set", name="env_set", method="process_inputs"),
+    ]
+
+    def process_inputs(self) -> Message:
         try:
-            fake_file = io.StringIO(dotenv_file_content)
+            print(self.dotenv_file_content)
+            fake_file = io.StringIO(self.dotenv_file_content)
             result = load_dotenv(stream=fake_file, override=True)
-            return result
+            message = Message(
+                text=str(result)
+            )
+            print(os.environ)
+            return message
         except Exception as e:
             raise e

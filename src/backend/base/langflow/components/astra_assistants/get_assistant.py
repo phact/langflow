@@ -1,28 +1,34 @@
-from langflow.custom import CustomComponent
+from langflow.custom import Component
 from openai import OpenAI
 from astra_assistants import patch
 
+from langflow.inputs import StrInput, MultilineInput
+from langflow.schema.message import Message
 
-class AssistantsGetAssistantName(CustomComponent):
+
+class AssistantsGetAssistantName(Component):
+    client = patch(OpenAI())
     display_name = "Get Assistant name"
     description = "Assistant by id"
 
-    def build_config(self):
-        return {
-            "assistant_id": {
-                "display_name": "Assistant ID",
-                "advanced": False,
-            },
-            "env_set": {
-                "display_name": "Environment Set",
-                "advanced": False,
-                "info": "Dummy input to allow chaining with Dotenv Component.",
-            },
-        }
+    inputs = [
+        StrInput(
+            name="assistant_id",
+            display_name="Assistant ID",
+            info="ID of the assistant",
+        ),
+        MultilineInput(
+            name="env_set",
+            display_name="Environment Set",
+            info="Dummy input to allow chaining with Dotenv Component.",
+        ),
+    ]
 
-    def build(self, assistant_id: str, env_set: str = None) -> str:
-        client = patch(OpenAI())
-        assistant = client.beta.assistants.retrieve(
-            assistant_id=assistant_id,
+    def build(self) -> Message:
+        assistant = self.client.beta.assistants.retrieve(
+            assistant_id=self.assistant_id,
         )
-        return assistant.name
+        message = Message(
+            text=assistant.name
+        )
+        return message
