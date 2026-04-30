@@ -53,6 +53,11 @@ from langflow.helpers.flow import get_flow_by_id_or_endpoint_name
 from langflow.interface.initialize.loading import update_params_with_load_from_db_fields
 from langflow.processing.process import process_tweaks, run_graph_internal
 from langflow.schema.graph import Tweaks
+from langflow.services.auth.flow_rbac import (
+    get_flow_by_id_or_name,
+    get_flow_principal,
+    require_flow_permission,
+)
 from langflow.services.auth.utils import (
     api_key_security,
     get_current_active_user,
@@ -60,7 +65,7 @@ from langflow.services.auth.utils import (
     get_optional_user,
 )
 from langflow.services.cache.utils import save_uploaded_file
-from langflow.services.database.models.flow.model import Flow, FlowRead
+from langflow.services.database.models.flow.model import Flow, FlowPermission, FlowRead
 from langflow.services.database.models.flow.utils import get_all_webhook_components_in_flow
 from langflow.services.database.models.user.model import User, UserRead
 from langflow.services.deps import get_auth_service, get_session_service, get_settings_service, get_telemetry_service
@@ -408,6 +413,8 @@ async def check_flow_user_permission(
     Raises:
         HTTPException: If the user does not have permission to run the flow
     """
+    if get_settings_service().auth_settings.FLOW_RBAC_ENABLED:
+        return
     if flow and flow.user_id != api_key_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to run this flow")
 
@@ -415,6 +422,8 @@ async def check_flow_user_permission(
 async def get_flow_for_api_key_user(
     flow_id_or_name: str,
     api_key_user: Annotated[UserRead, Depends(api_key_security)],
+    request: Request,
+    session: DbSession,
 ) -> FlowRead:
     """Auth-aware wrapper around ``get_flow_by_id_or_endpoint_name`` for API-key routes.
 
@@ -428,15 +437,39 @@ async def get_flow_for_api_key_user(
     layer.  ``check_flow_user_permission`` is kept in the handler chain as
     defense in depth.
     """
-    return await get_flow_by_id_or_endpoint_name(flow_id_or_name, api_key_user.id)
+    if not get_settings_service().auth_settings.FLOW_RBAC_ENABLED:
+        return await get_flow_by_id_or_endpoint_name(flow_id_or_name, api_key_user.id)
+
+    principal = await get_flow_principal(request, api_key_user)
+    flow = await require_flow_permission(
+        session,
+        await get_flow_by_id_or_name(session, flow_id_or_name),
+        principal,
+        FlowPermission.RUN,
+        not_found_detail=f"Flow identifier {flow_id_or_name} not found",
+    )
+    return FlowRead.model_validate(flow, from_attributes=True)
 
 
 async def get_flow_for_current_user(
     flow_id_or_name: str,
     current_user: CurrentActiveUser,
+    request: Request,
+    session: DbSession,
 ) -> FlowRead:
     """Session-auth variant of :func:`get_flow_for_api_key_user`."""
-    return await get_flow_by_id_or_endpoint_name(flow_id_or_name, current_user.id)
+    if not get_settings_service().auth_settings.FLOW_RBAC_ENABLED:
+        return await get_flow_by_id_or_endpoint_name(flow_id_or_name, current_user.id)
+
+    principal = await get_flow_principal(request, current_user)
+    flow = await require_flow_permission(
+        session,
+        await get_flow_by_id_or_name(session, flow_id_or_name),
+        principal,
+        FlowPermission.RUN,
+        not_found_detail=f"Flow identifier {flow_id_or_name} not found",
+    )
+    return FlowRead.model_validate(flow, from_attributes=True)
 
 
 async def _run_flow_internal(
@@ -710,6 +743,7 @@ async def webhook_events_stream(
     flow_id_or_name: str,  # noqa: ARG001 - Used by get_flow_by_id_or_endpoint_name dependency
     flow: Annotated[Flow, Depends(get_flow_by_id_or_endpoint_name)],
     user: Annotated[User | UserRead, Depends(get_current_user_for_sse)],
+    session: DbSession,
     request: Request,
 ):
     """Server-Sent Events (SSE) endpoint for real-time webhook build updates.
@@ -720,8 +754,10 @@ async def webhook_events_stream(
     Authentication: Requires user to be logged in (via cookie) or provide API key.
     The user must own the flow to subscribe to its events.
     """
-    # Verify user owns the flow
-    if str(flow.user_id) != str(user.id):
+    if get_settings_service().auth_settings.FLOW_RBAC_ENABLED:
+        principal = await get_flow_principal(request, user)
+        await require_flow_permission(session, flow, principal, FlowPermission.RUN)
+    elif str(flow.user_id) != str(user.id):
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,
             detail="Access denied: You can only subscribe to events for flows you own",
@@ -930,7 +966,7 @@ async def experimental_run_flow(
         try:
             # Get the flow that matches the flow_id and belongs to the user
             # flow = session.query(Flow).filter(Flow.id == flow_id).filter(Flow.user_id == api_key_user.id).first()
-            stmt = select(Flow).where(Flow.id == flow.id).where(Flow.user_id == api_key_user.id)
+            stmt = select(Flow).where(Flow.id == flow.id)
             flow = (await session.exec(stmt)).first()
         except sa.exc.StatementError as exc:
             # StatementError('(builtins.ValueError) badly formed hexadecimal UUID string')
